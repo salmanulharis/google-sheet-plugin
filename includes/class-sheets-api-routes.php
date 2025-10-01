@@ -9,6 +9,16 @@ class Sheets_API_Routes {
     public static function register_routes() {
         register_rest_route(
             Sheets_API_Plugin::REST_NAMESPACE,
+            '/test_connection',
+            [
+                'methods'             => \WP_REST_Server::READABLE,
+                'callback'            => [ __CLASS__, 'test_connection' ],
+                'permission_callback' => '__return_true',
+            ]
+        );
+
+        register_rest_route(
+            Sheets_API_Plugin::REST_NAMESPACE,
             '/get_products',
             [
                 'methods'             => \WP_REST_Server::READABLE,
@@ -34,11 +44,33 @@ class Sheets_API_Routes {
         );
     }
 
+    /**
+     * Test Connection Endpoint
+     */
+    public static function test_connection( \WP_REST_Request $request ) {
+        $headers = $request->get_headers();
+        $sheet_token = isset( $headers['x_sheet_token'][0] ) ? $headers['x_sheet_token'][0] : '';
+        $sheet_id = Sheets_API_Plugin::decrypt_sheet_id( $sheet_token );
+        if ( $sheet_id !== Sheets_API_Plugin::get_sheet_id() ) {
+            return new \WP_Error( 'invalid_sheet_id', 'Invalid Sheet ID.', [ 'status' => 403 ] );
+        }
+
+        $data = [
+            'status'  => 'success',
+            'message' => __( 'Connection successfull!', 'sheets-api' ),
+            'time'    => current_time( 'mysql' ),
+        ];
+
+        return rest_ensure_response( $data );
+    }
+
+    /**
+     * Update Products Endpoint
+     */
     public static function update_products( \WP_REST_Request $request ) {
         $headers = $request->get_headers();
         $sheet_token = isset( $headers['x_sheet_token'][0] ) ? $headers['x_sheet_token'][0] : '';
         $sheet_id = Sheets_API_Plugin::decrypt_sheet_id( $sheet_token );
-        write_log('Decrypted Sheet ID: ' . $sheet_id);
         if ( $sheet_id !== Sheets_API_Plugin::get_sheet_id() ) {
             return new \WP_Error( 'invalid_sheet_id', 'Invalid Sheet ID.', [ 'status' => 403 ] );
         }
@@ -215,7 +247,6 @@ class Sheets_API_Routes {
         $headers = $request->get_headers();
         $sheet_token = isset( $headers['x_sheet_token'][0] ) ? $headers['x_sheet_token'][0] : '';
         $sheet_id = Sheets_API_Plugin::decrypt_sheet_id( $sheet_token );
-        write_log('Decrypted Sheet ID: ' . $sheet_id);
         if ( $sheet_id !== Sheets_API_Plugin::get_sheet_id() ) {
             return new \WP_Error( 'invalid_sheet_id', 'Invalid Sheet ID.', [ 'status' => 403 ] );
         }
