@@ -96,6 +96,7 @@ class Sheets_API_Admin {
         ?>
         <div>
             <input type="text" name="sheets_api_options[secret_key]" value="<?php echo esc_attr( $secret_key ); ?>" class="regular-text" readonly />
+            <button type="button" class="button" id="copy-secret-key"><?php _e( 'Copy', 'sheets-api' ); ?></button>
             <button type="button" class="button" id="generate-secret-key"><?php _e( 'Generate New Key', 'sheets-api' ); ?></button>
         </div>
         <p class="description"><?php _e( 'This secret key is used for API authentication. Click "Generate New Key" to create a new one.', 'sheets-api' ); ?></p>

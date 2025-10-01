@@ -16,6 +16,25 @@
             $('input[name="sheets_api_options[secret_key]"]').val(result);
         });
 
+        // Copy secret key functionality
+        $('#copy-secret-key').on('click', function (e) {
+            e.preventDefault();
+
+            const secretKey = $('input[name="sheets_api_options[secret_key]"]').val();
+
+            if (!secretKey) {
+                alert('No secret key found!');
+                return;
+            }
+
+            navigator.clipboard.writeText(secretKey).then(() => {
+                alert('Secret key copied to clipboard!');
+            }).catch(err => {
+                console.error('Clipboard copy failed:', err);
+            });
+        });
+
+
         // Add any additional admin JavaScript here
     });
 

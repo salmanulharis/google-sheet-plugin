@@ -35,6 +35,14 @@ class Sheets_API_Routes {
     }
 
     public static function update_products( \WP_REST_Request $request ) {
+        $headers = $request->get_headers();
+        $sheet_token = isset( $headers['x_sheet_token'][0] ) ? $headers['x_sheet_token'][0] : '';
+        $sheet_id = Sheets_API_Plugin::decrypt_sheet_id( $sheet_token );
+        write_log('Decrypted Sheet ID: ' . $sheet_id);
+        if ( $sheet_id !== Sheets_API_Plugin::get_sheet_id() ) {
+            return new \WP_Error( 'invalid_sheet_id', 'Invalid Sheet ID.', [ 'status' => 403 ] );
+        }
+
         $products = $request->get_param( 'products' );
 
         if ( ! is_array( $products ) ) {
@@ -204,9 +212,12 @@ class Sheets_API_Routes {
      * Get Products Endpoint
      */
     public static function get_products( \WP_REST_Request $request ) {
-        // Debug log
-        if ( function_exists( 'write_log' ) ) {
-            write_log('Get Products API called');
+        $headers = $request->get_headers();
+        $sheet_token = isset( $headers['x_sheet_token'][0] ) ? $headers['x_sheet_token'][0] : '';
+        $sheet_id = Sheets_API_Plugin::decrypt_sheet_id( $sheet_token );
+        write_log('Decrypted Sheet ID: ' . $sheet_id);
+        if ( $sheet_id !== Sheets_API_Plugin::get_sheet_id() ) {
+            return new \WP_Error( 'invalid_sheet_id', 'Invalid Sheet ID.', [ 'status' => 403 ] );
         }
         
         $products = wc_get_products( array(

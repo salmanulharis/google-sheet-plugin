@@ -52,6 +52,55 @@ class Sheets_API_Plugin {
         $options = get_option( 'sheets_api_options' );
         return isset( $options['secret_key'] ) ? $options['secret_key'] : '';
     }
+
+    /**
+     * Decrypt sheet ID using secret key
+     */
+    public static function decrypt_sheet_id( $encrypted_id ) {
+        $secret_key = self::get_secret_key();
+        if ( empty( $secret_key ) ) {
+            return '';
+        }
+
+        // Decode from Base64
+        $decoded = base64_decode( $encrypted_id );
+        if ( $decoded === false ) {
+            return '';
+        }
+
+        // XOR decryption
+        $decrypted = '';
+        $key_length = strlen( $secret_key );
+        for ( $i = 0; $i < strlen( $decoded ); $i++ ) {
+            $decrypted .= chr(
+                ord( $decoded[$i] ) ^ ord( $secret_key[$i % $key_length] )
+            );
+        }
+
+        // Split into [sheet_id | timestamp]
+        $parts = explode( '|', $decrypted );
+        if ( count( $parts ) !== 2 ) {
+            return ''; // invalid format
+        }
+
+        $sheet_id  = $parts[0];
+        $timestamp = (int) $parts[1];
+
+        // Current time in ms
+        $now = (int) round(microtime(true) * 1000);
+
+        // Allow expiry time to be filtered (default: 60,000 ms = 1 minute)
+        $expiry_time = apply_filters( 'sheets_api_decrypt_expiry_time', 60000, $sheet_id, $timestamp );
+
+        // Expiry check
+        if ( $now - $timestamp > $expiry_time ) {
+            return ''; // expired
+        }
+
+        return $sheet_id; // return only the key
+    }
+
+
 }
 
 Sheets_API_Plugin::init();
