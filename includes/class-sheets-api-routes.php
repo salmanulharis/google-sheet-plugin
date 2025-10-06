@@ -95,8 +95,8 @@ class Sheets_API_Routes {
             }
 
             // Check if product ID is provided and exists
-            if ( isset( $product_data['id'] ) && ! empty( $product_data['id'] ) && is_numeric( $product_data['id'] ) ) {
-                $product_id = intval( $product_data['id'] );
+            if ( isset( $product_data['product_id'] ) && ! empty( $product_data['product_id'] ) && is_numeric( $product_data['product_id'] ) ) {
+                $product_id = intval( $product_data['product_id'] );
                 $product = wc_get_product( $product_id );
             }
 
@@ -128,11 +128,18 @@ class Sheets_API_Routes {
                 }
 
                 // Determine product type and create appropriate product object
-                $product_type = isset( $product_data['product_type'] ) ? sanitize_text_field( $product_data['product_type'] ) : 'simple';
+                $product_type = isset( $product_data['type'] ) ? sanitize_text_field( $product_data['type'] ) : 'simple';
                 
                 switch ( $product_type ) {
                     case 'variable':
                         $product = new \WC_Product_Variable();
+                        break;
+                    case 'variation':
+                        $product = new \WC_Product_Variation();
+                        // Set parent ID if provided
+                        if ( isset( $product_data['parent_id'] ) && ! empty( $product_data['parent_id'] ) ) {
+                            $product->set_parent_id( intval( $product_data['parent_id'] ) );
+                        }
                         break;
                     case 'grouped':
                         $product = new \WC_Product_Grouped();
@@ -147,33 +154,27 @@ class Sheets_API_Routes {
                 }
             }
 
-            // Update/Set product fields if provided
+            // Update/Set product fields if provided (only specified fields)
             if ( isset( $product_data['name'] ) ) {
                 $product->set_name( sanitize_text_field( $product_data['name'] ) );
             }
-            if ( isset( $product_data['description'] ) ) {
-                $product->set_description( wp_kses_post( $product_data['description'] ) );
+            if ( isset( $product_data['sku'] ) ) {
+                $product->set_sku( sanitize_text_field( $product_data['sku'] ) );
             }
-            if ( isset( $product_data['short_description'] ) ) {
-                $product->set_short_description( wp_kses_post( $product_data['short_description'] ) );
-            }
-            if ( isset( $product_data['price'] ) ) {
-                $product->set_price( floatval( $product_data['price'] ) );
-            }
-            if ( isset( $product_data['regular_price'] ) ) {
+            if ( isset( $product_data['regular_price'] ) && ! empty( $product_data['regular_price'] ) ) {
                 $product->set_regular_price( floatval( $product_data['regular_price'] ) );
             }
             if ( isset( $product_data['sale_price'] ) && ! empty( $product_data['sale_price'] ) ) {
                 $product->set_sale_price( floatval( $product_data['sale_price'] ) );
             }
-            if ( isset( $product_data['stock_quantity'] ) && ! empty( $product_data['stock_quantity'] ) ) {
-                $product->set_stock_quantity( intval( $product_data['stock_quantity'] ) );
+            if ( isset( $product_data['stock'] ) && ! empty( $product_data['stock'] ) ) {
+                $product->set_stock_quantity( intval( $product_data['stock'] ) );
             }
-            if ( isset( $product_data['stock_status'] ) ) {
-                $product->set_stock_status( sanitize_text_field( $product_data['stock_status'] ) );
+            if ( isset( $product_data['status'] ) ) {
+                $product->set_status( sanitize_text_field( $product_data['status'] ) );
             }
-            if ( isset( $product_data['sku'] ) ) {
-                $product->set_sku( sanitize_text_field( $product_data['sku'] ) );
+            if ( isset( $product_data['parent_id'] ) && ! empty( $product_data['parent_id'] ) ) {
+                $product->set_parent_id( intval( $product_data['parent_id'] ) );
             }
 
             // Set status for new products
@@ -185,29 +186,68 @@ class Sheets_API_Routes {
             $product_id = $product->save();
             
             if ( $product_id ) {
-                // Handle categories if provided
-                if ( isset( $product_data['categories'] ) && is_array( $product_data['categories'] ) ) {
-                    $category_ids = [];
-                    foreach ( $product_data['categories'] as $category_name ) {
-                        $term = get_term_by( 'name', $category_name, 'product_cat' );
-                        if ( ! $term ) {
-                            // Create category if it doesn't exist
-                            $term = wp_insert_term( $category_name, 'product_cat' );
-                            if ( ! is_wp_error( $term ) ) {
-                                $category_ids[] = $term['term_id'];
+                // Handle attributes if provided in 'Color:Red, Size:M' format
+                if ( isset( $product_data['attributes'] ) && ! empty( $product_data['attributes'] ) ) {
+                    $attributes_string = sanitize_text_field( $product_data['attributes'] );
+                    
+                    if ( $product->get_type() === 'variation' ) {
+                        // For variations, set variation attributes
+                        $variation_attributes = [];
+                        $attribute_pairs = array_map( 'trim', explode( ',', $attributes_string ) );
+                        
+                        foreach ( $attribute_pairs as $pair ) {
+                            if ( strpos( $pair, ':' ) !== false ) {
+                                list( $attr_name, $attr_value ) = array_map( 'trim', explode( ':', $pair, 2 ) );
+                                
+                                if ( ! empty( $attr_name ) && ! empty( $attr_value ) ) {
+                                    // Convert to WooCommerce attribute format
+                                    $attr_key = 'attribute_pa_' . sanitize_title( strtolower( $attr_name ) );
+                                    $variation_attributes[ $attr_key ] = sanitize_title( strtolower( $attr_value ) );
+                                }
                             }
-                        } else {
-                            $category_ids[] = $term->term_id;
+                        }
+                        
+                        if ( ! empty( $variation_attributes ) ) {
+                            foreach ( $variation_attributes as $key => $value ) {
+                                update_post_meta( $product->get_id(), $key, $value );
+                            }
+                        }
+                    } else {
+                        // For parent products, set product attributes
+                        $attribute_pairs = array_map( 'trim', explode( ',', $attributes_string ) );
+                        $attributes = [];
+                        $grouped_attributes = [];
+                        
+                        // Parse each attribute pair (e.g., 'Color:Red')
+                        foreach ( $attribute_pairs as $pair ) {
+                            if ( strpos( $pair, ':' ) !== false ) {
+                                list( $attr_name, $attr_value ) = array_map( 'trim', explode( ':', $pair, 2 ) );
+                                
+                                if ( ! empty( $attr_name ) && ! empty( $attr_value ) ) {
+                                    if ( ! isset( $grouped_attributes[ $attr_name ] ) ) {
+                                        $grouped_attributes[ $attr_name ] = [];
+                                    }
+                                    $grouped_attributes[ $attr_name ][] = $attr_value;
+                                }
+                            }
+                        }
+                        
+                        // Create WC_Product_Attribute objects
+                        $position = 0;
+                        foreach ( $grouped_attributes as $attr_name => $attr_values ) {
+                            $attribute = new \WC_Product_Attribute();
+                            $attribute->set_name( sanitize_title( $attr_name ) );
+                            $attribute->set_options( array_unique( $attr_values ) );
+                            $attribute->set_position( $position++ );
+                            $attribute->set_visible( true );
+                            $attribute->set_variation( $product->get_type() === 'variable' );
+                            $attributes[ sanitize_title( $attr_name ) ] = $attribute;
+                        }
+                        
+                        if ( ! empty( $attributes ) ) {
+                            $product->set_attributes( $attributes );
                         }
                     }
-                    if ( ! empty( $category_ids ) ) {
-                        wp_set_object_terms( $product_id, $category_ids, 'product_cat' );
-                    }
-                }
-
-                // Handle tags if provided
-                if ( isset( $product_data['tags'] ) && is_array( $product_data['tags'] ) ) {
-                    wp_set_object_terms( $product_id, $product_data['tags'], 'product_tag' );
                 }
 
                 $processed_products[] = $product_id;
@@ -247,47 +287,144 @@ class Sheets_API_Routes {
         $headers = $request->get_headers();
         $sheet_token = isset( $headers['x_sheet_token'][0] ) ? $headers['x_sheet_token'][0] : '';
         $sheet_id = Sheets_API_Plugin::decrypt_sheet_id( $sheet_token );
+        
         if ( $sheet_id !== Sheets_API_Plugin::get_sheet_id() ) {
             return new \WP_Error( 'invalid_sheet_id', 'Invalid Sheet ID.', [ 'status' => 403 ] );
         }
         
-        $products = wc_get_products( array(
-            'limit' => -1,
-        ) );
-
+        global $wpdb;
+        
+        // Single optimized query to get all product IDs with their types and parent IDs
+        $product_ids = $wpdb->get_results("
+            SELECT p.ID, p.post_type, p.post_parent, 
+                pm.meta_value as product_type
+            FROM {$wpdb->posts} p
+            LEFT JOIN {$wpdb->postmeta} pm ON (
+                p.ID = pm.post_id 
+                AND pm.meta_key = '_product_type'
+            )
+            WHERE p.post_type IN ('product', 'product_variation')
+            AND p.post_status = 'publish'
+            ORDER BY p.post_parent ASC, p.post_type ASC, p.ID ASC
+        ");
+        
         $products_data = [];
+        $variations_map = [];
+        $parent_products = [];
 
-        foreach ( $products as $product ) {
-            $post = get_post( $product->get_id() );
-            $categories = wp_get_post_terms( $product->get_id(), 'product_cat', array( 'fields' => 'names' ) );
-            $tags = wp_get_post_terms( $product->get_id(), 'product_tag', array( 'fields' => 'names' ) );
-            $featured_image = get_the_post_thumbnail_url( $product->get_id(), 'thumbnail' );
+        // Process products in optimal order
+        foreach ( $product_ids as $product_info ) {
+            $product = wc_get_product( $product_info->ID );
+            
+            if ( ! $product ) {
+                continue;
+            }
 
-            $products_data[] = [
-                'id'                => $product->get_id(),
-                'name'              => $post->post_title,
-                'description'       => $post->post_content,
-                'short_description' => $post->post_excerpt,
-                'product_type'      => $product->get_type(),
-                'price'             => $product->get_price(),
-                'regular_price'     => $product->get_regular_price(),
-                'sale_price'        => $product->get_sale_price(),
-                'stock_quantity'    => $product->get_stock_quantity(),
-                'stock_status'      => $product->get_stock_status(),
-                'sku'               => $product->get_sku(),
-                'categories'        => $categories,
-                'tags'              => $tags,
-                'featured_image'    => $featured_image,
-            ];
+            $formatted_data = self::format_product_data( $product );
+
+            if ( $product->is_type( 'variation' ) ) {
+                $parent_id = $product_info->post_parent;
+                $variations_map[ $parent_id ][] = $formatted_data;
+            } else {
+                $parent_products[ $product_info->ID ] = $formatted_data;
+            }
         }
+
+        // Build final array with variations following parents
+        foreach ( $parent_products as $parent_id => $parent_product ) {
+            $products_data[] = $parent_product;
+            
+            // Add variations for this parent
+            if ( isset( $variations_map[ $parent_id ] ) ) {
+                foreach ( $variations_map[ $parent_id ] as $variation ) {
+                    $products_data[] = $variation;
+                }
+            }
+        }
+
+        // reverse the order of the products data array
+        $products_data = array_reverse( $products_data );
 
         $data = [
             'status'  => 'success',
-            'message' => __( 'Here is some sample data from Sheets API plugin!', 'sheets-api' ),
+            'message' => __( 'Products data retrieved successfully.', 'sheets-api' ),
             'time'    => current_time( 'mysql' ),
+            'count'   => count( $products_data ),
             'data'    => $products_data,
         ];
 
         return rest_ensure_response( $data );
+    }
+
+    /**
+     * Format product data for API response
+     */
+    private static function format_product_data( $product ) {
+        $attributes_string = '';
+        
+        if ( $product->get_type() === 'variation' ) {
+            // For variations, get the variation attributes
+            $variation_attributes = $product->get_variation_attributes();
+            $attribute_pairs = [];
+            
+            foreach ( $variation_attributes as $attribute_name => $attribute_value ) {
+                if ( ! empty( $attribute_value ) ) {
+                    // Clean up attribute name (remove 'attribute_' prefix and pa_ taxonomy prefix)
+                    $clean_name = str_replace( 'attribute_', '', $attribute_name );
+                    $clean_name = str_replace( 'pa_', '', $clean_name );
+                    $clean_name = ucfirst( str_replace( '-', ' ', $clean_name ) );
+                    
+                    // Get the actual term name if it's a taxonomy
+                    if ( strpos( $attribute_name, 'pa_' ) !== false ) {
+                        $term = get_term_by( 'slug', $attribute_value, $attribute_name );
+                        if ( $term && ! is_wp_error( $term ) ) {
+                            $attribute_value = $term->name;
+                        }
+                    }
+                    
+                    $attribute_pairs[] = $clean_name . ':' . ucfirst( $attribute_value );
+                }
+            }
+            
+            $attributes_string = implode( ', ', $attribute_pairs );
+        } else {
+            // For parent products (simple, variable, etc.), show empty attributes or available options
+            if ( $product->get_type() === 'variable' ) {
+                // For variable products, we don't show attributes in the parent row
+                $attributes_string = '';
+            } else {
+                // For simple products, get custom attributes if any
+                $product_attributes = $product->get_attributes();
+                $attribute_pairs = [];
+                
+                foreach ( $product_attributes as $attribute ) {
+                    if ( ! $attribute->is_taxonomy() ) {
+                        // For custom attributes only
+                        $attribute_name = $attribute->get_name();
+                        $attribute_values = $attribute->get_options();
+                        if ( ! empty( $attribute_values ) ) {
+                            foreach ( $attribute_values as $value ) {
+                                $attribute_pairs[] = $attribute_name . ':' . $value;
+                            }
+                        }
+                    }
+                }
+                
+                $attributes_string = implode( ', ', $attribute_pairs );
+            }
+        }
+
+        return [
+            'id'    => $product->get_id(),
+            'type'          => $product->get_type(),
+            'parent_id'     => $product->get_parent_id() ?: '',
+            'name'          => $product->get_name(),
+            'sku'           => $product->get_sku() ?: '',
+            'attributes'    => $attributes_string,
+            'regular_price' => $product->get_regular_price() ?: '',
+            'sale_price'    => $product->get_sale_price() ?: '',
+            'stock'         => $product->get_stock_quantity() ?: '',
+            'status'        => $product->get_status(),
+        ];
     }
 }
