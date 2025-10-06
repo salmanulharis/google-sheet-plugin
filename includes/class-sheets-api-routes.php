@@ -81,6 +81,84 @@ class Sheets_API_Routes {
             return new \WP_Error( 'invalid_data', 'Products data must be an array.', [ 'status' => 400 ] );
         }
 
+        // split products, and variation to two lists
+        $products_data = [];
+        $variations_data = [];
+
+        foreach ( $products as $product_data ) {
+            if ( isset( $product_data['type'] ) && $product_data['type'] === 'variation' ) {
+                $variations_data[] = $product_data;
+            } else {
+                $products_data[] = $product_data;
+            }
+        }
+
+        $processed_products = [];
+        $created_products = [];
+        $updated_products = [];
+
+        foreach ( $products_data as $product_data ) {
+            if ( isset( $product_data['product_id'] ) && ! empty( $product_data['product_id'] ) && is_numeric( $product_data['product_id'] ) ) {
+                if ( isset( $product_data['type'] ) && $product_data['type'] === 'variable' ) {
+                    $related_variations = array_filter( $variations_data, function( $var ) use ( $product_data ) {
+                        return isset( $var['parent_id'] ) && $var['parent_id'] == $product_data['product_id'];
+                    } );
+                    $result = self::update_existing_variable_product( $product_data, $related_variations );
+                }else {
+                    $result = self::update_existing_product( $product_data );
+                }
+            } else {
+                $result = self::create_new_product( $product_data );
+            }
+
+            if ( is_wp_error( $result ) ) {
+                $processed_products[] = $product_data;
+            } else {
+                if ( $result['status'] === 'created' ) {
+                    $created_products[] = $result['product'];
+                } elseif ( $result['status'] === 'updated' ) {
+                    $updated_products[] = $result['product'];
+                }
+            }
+        }
+
+        if ( empty( $processed_products ) ) {
+            return new \WP_Error( 'no_products_processed', 'No products were created or updated.', [ 'status' => 400 ] );
+        }
+
+        return rest_ensure_response( [
+            'status'  => 'success',
+            'message' => sprintf( 
+                __( '%d products processed successfully (%d created, %d updated).', 'sheets-api' ),
+                count( $processed_products ),
+                count( $created_products ),
+                count( $updated_products )
+            ),
+            'data'    => [
+                'processed' => $processed_products,
+                'created'   => $created_products,
+                'updated'   => $updated_products,
+            ],
+        ] );
+    }
+
+    /**
+     * Update Products Endpoint
+     */
+    public static function update_products_old( \WP_REST_Request $request ) {
+        $headers = $request->get_headers();
+        $sheet_token = isset( $headers['x_sheet_token'][0] ) ? $headers['x_sheet_token'][0] : '';
+        $sheet_id = Sheets_API_Plugin::decrypt_sheet_id( $sheet_token );
+        if ( $sheet_id !== Sheets_API_Plugin::get_sheet_id() ) {
+            return new \WP_Error( 'invalid_sheet_id', 'Invalid Sheet ID.', [ 'status' => 403 ] );
+        }
+
+        $products = $request->get_param( 'products' );
+
+        if ( ! is_array( $products ) ) {
+            return new \WP_Error( 'invalid_data', 'Products data must be an array.', [ 'status' => 400 ] );
+        }
+
         $processed_products = [];
         $created_products = [];
         $updated_products = [];
@@ -387,31 +465,57 @@ class Sheets_API_Routes {
             }
             
             $attributes_string = implode( ', ', $attribute_pairs );
-        } else {
-            // For parent products (simple, variable, etc.), show empty attributes or available options
-            if ( $product->get_type() === 'variable' ) {
-                // For variable products, we don't show attributes in the parent row
-                $attributes_string = '';
-            } else {
-                // For simple products, get custom attributes if any
-                $product_attributes = $product->get_attributes();
-                $attribute_pairs = [];
-                
-                foreach ( $product_attributes as $attribute ) {
-                    if ( ! $attribute->is_taxonomy() ) {
-                        // For custom attributes only
-                        $attribute_name = $attribute->get_name();
-                        $attribute_values = $attribute->get_options();
-                        if ( ! empty( $attribute_values ) ) {
-                            foreach ( $attribute_values as $value ) {
-                                $attribute_pairs[] = $attribute_name . ':' . $value;
-                            }
+        } elseif ( $product->get_type() === 'variable' ) {
+            // For variable products, show attributes and their readable values
+            $attributes_string = '';
+            $product_attributes = $product->get_attributes();
+            $attribute_pairs = [];
+
+            foreach ( $product_attributes as $attribute ) {
+                $attribute_name = wc_attribute_label( $attribute->get_name() ); // Get readable label
+
+                $options = $attribute->get_options();
+                $values = [];
+
+                if ( $attribute->is_taxonomy() ) {
+                    // Taxonomy-based attribute (like pa_color)
+                    foreach ( $options as $term_id ) {
+                        $term = get_term( $term_id );
+                        if ( ! is_wp_error( $term ) && $term ) {
+                            $values[] = $term->name;
+                        }
+                    }
+                } else {
+                    // Custom attribute (manual input)
+                    $values = $options;
+                }
+
+                if ( ! empty( $values ) ) {
+                    $attribute_pairs[] = $attribute_name . ':' . implode( '|', $values );
+                }
+            }
+
+            $attributes_string = implode( ', ', $attribute_pairs);
+
+        }
+        else {
+            $product_attributes = $product->get_attributes();
+            $attribute_pairs = [];
+            
+            foreach ( $product_attributes as $attribute ) {
+                if ( ! $attribute->is_taxonomy() ) {
+                    // For custom attributes only
+                    $attribute_name = $attribute->get_name();
+                    $attribute_values = $attribute->get_options();
+                    if ( ! empty( $attribute_values ) ) {
+                        foreach ( $attribute_values as $value ) {
+                            $attribute_pairs[] = $attribute_name . ':' . $value;
                         }
                     }
                 }
-                
-                $attributes_string = implode( ', ', $attribute_pairs );
             }
+            
+            $attributes_string = implode( ', ', $attribute_pairs );
         }
 
         return [
