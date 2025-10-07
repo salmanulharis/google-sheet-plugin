@@ -272,17 +272,24 @@ class Sheets_API_Routes {
         $updated_products = [];
 
         foreach ( $products_data as $product_data ) {
-            if ( isset( $product_data['product_id'] ) && ! empty( $product_data['product_id'] ) && is_numeric( $product_data['product_id'] ) ) {
+            if ( isset( $product_data['id'] ) && ! empty( $product_data['id'] ) && is_numeric( $product_data['id'] ) ) {
                 if ( isset( $product_data['type'] ) && $product_data['type'] === 'variable' ) {
                     $related_variations = array_filter( $variations_data, function( $var ) use ( $product_data ) {
-                        return isset( $var['parent_id'] ) && $var['parent_id'] == $product_data['product_id'];
+                        return isset( $var['parent_id'] ) && $var['parent_id'] == $product_data['id'];
                     } );
                     $result = self::update_existing_variable_product( $product_data, $related_variations );
                 }else {
                     $result = self::update_existing_product( $product_data );
                 }
             } else {
-                $result = self::create_new_product( $product_data );
+                if ( isset( $product_data['type'] ) && $product_data['type'] === 'variable' ) {
+                    $related_variations = array_filter( $variations_data, function( $var ) use ( $product_data ) {
+                        return isset( $var['parent_id'] ) && $var['parent_id'] == ( isset( $product_data['id'] ) ? $product_data['id'] : 0 );
+                    } );
+                    $result = self::create_new_variable_product( $product_data, $related_variations );
+                } else {
+                    $result = self::create_new_product( $product_data );
+                }
             }
 
             if ( is_wp_error( $result ) ) {
@@ -316,6 +323,364 @@ class Sheets_API_Routes {
         ] );
     }
 
+    public static function create_new_variable_product($product_data, $related_variations = []) {
+        $product = new \WC_Product_Variable();
+
+        // Validate basic product data structure
+        if ( ! is_array( $product_data ) ) {
+            return new \WP_Error( 'invalid_product_data', 'Invalid product data structure.', [ 'status' => 400 ] );
+        }
+
+        // Validate required fields for new products
+        if ( ! isset( $product_data['name'] ) || empty( trim( $product_data['name'] ) ) ) {
+            return new \WP_Error( 'missing_name', 'Product name is required for new products.', [ 'status' => 400 ] );
+        }
+
+        // Check for basic required data for new products
+        $has_basic_data = (
+            isset( $product_data['name'] ) && ! empty( trim( $product_data['name'] ) )
+        );
+
+        // Update/Set product fields if provided (only specified fields)
+        if ( isset( $product_data['name'] ) ) {
+            $product->set_name( sanitize_text_field( $product_data['name'] ) );
+        }
+        if ( isset( $product_data['attributes'] ) ) {
+            // Example input: "size:Large|Small, color:Red|Blue"
+            $attribute_string = sanitize_text_field( $product_data['attributes'] );
+            self::create_attributes_for_variable_product($product, $attribute_string);
+        }
+
+        // Set status for new products
+        $product->set_status( 'publish' );
+        // Save the product
+        $product_id = $product->save();
+        //get new product data
+        $product = wc_get_product( $product_id );
+        $product_data = self::format_product_data( $product );
+
+        $variation_result = self::create_variations_for_variable_product( $product_id, $related_variations );
+        
+        $result = [
+            'status'  => 'created',
+            'product' => $product_data,
+        ];
+        return $result;
+    }
+
+    public static function create_attributes_for_variable_product($product, $attributes_string = '' ) {
+        $parsed_attributes = [];
+        foreach ( explode( ',', $attributes_string ) as $attr ) {
+            $attr = trim( $attr );
+            if ( ! $attr ) continue;
+
+            list( $name, $values ) = array_map( 'trim', explode( ':', $attr ) );
+            $values_array = array_map( 'trim', explode( '|', $values ) );
+            $parsed_attributes[ $name ] = $values_array;
+        }
+
+        $product_attributes = [];
+
+        foreach ( $parsed_attributes as $attr_name => $options ) {
+            $taxonomy = 'pa_' . sanitize_title( $attr_name );
+
+            // Create taxonomy if it doesn't exist
+            if ( ! taxonomy_exists( $taxonomy ) ) {
+                register_taxonomy(
+                    $taxonomy,
+                    'product',
+                    [
+                        'label'        => ucfirst( $attr_name ),
+                        'public'       => false,
+                        'hierarchical' => false,
+                        'show_ui'      => false,
+                        'query_var'    => true,
+                        'rewrite'      => false,
+                    ]
+                );
+            }
+
+            // Ensure terms exist
+            foreach ( $options as $option ) {
+                if ( ! term_exists( $option, $taxonomy ) ) {
+                    wp_insert_term( $option, $taxonomy );
+                }
+            }
+
+            // Assign terms to the product
+            wp_set_object_terms( $product->get_id(), $options, $taxonomy );
+
+            // ✅ Build attribute object with assigned values
+            $attribute = new WC_Product_Attribute();
+            $attribute->set_id( wc_attribute_taxonomy_id_by_name( $taxonomy ) );
+            $attribute->set_name( $taxonomy );
+            $attribute->set_options( $options );
+            $attribute->set_visible( true );
+            $attribute->set_variation( true );
+
+            $product_attributes[ $taxonomy ] = $attribute;
+        }
+
+        // ✅ Assign and save attributes to the product
+        $product->set_attributes( $product_attributes );
+        $product->save();
+    }
+
+    public static function create_variations_for_variable_product($parent_id, $variations_data) {
+        $created_variations = [];
+        $create_variations = [];
+        $update_variations = [];
+
+        // Helper to parse attributes string into array
+        $parse_attributes = function($variation_data) {
+            $variation_attrs = [];
+            $variation_string = isset($variation_data['attributes']) ? sanitize_text_field($variation_data['attributes']) : '';
+            foreach (explode(',', $variation_string) as $attr) {
+                $attr = trim($attr);
+                if (!$attr) continue;
+                $parts = array_map('trim', explode(':', $attr, 2));
+                if (count($parts) === 2) {
+                    $variation_attrs[$parts[0]] = $parts[1];
+                }
+            }
+            return $variation_attrs;
+        };
+
+        // Helper to format attributes for WooCommerce
+        $format_attributes = function($attributes) {
+            $formatted = [];
+            foreach ($attributes as $attr_name => $attr_value) {
+                $taxonomy = 'pa_' . sanitize_title($attr_name);
+                $term = get_term_by('name', $attr_value, $taxonomy);
+                if ($term) {
+                    $formatted[$taxonomy] = $term->slug;
+                } else {
+                    $formatted[$attr_name] = $attr_value;
+                }
+            }
+            return $formatted;
+        };
+
+        foreach ($variations_data as $variation_data) {
+            $variation_entry = [
+                'id'            => isset($variation_data['id']) && is_numeric($variation_data['id']) ? intval($variation_data['id']) : null,
+                'attributes'    => $parse_attributes($variation_data),
+                'regular_price' => $variation_data['regular_price'] ?? '',
+                'sale_price'    => $variation_data['sale_price'] ?? ''
+            ];
+            if ($variation_entry['id']) {
+                $update_variations[] = $variation_entry;
+            } else {
+                $create_variations[] = $variation_entry;
+            }
+        }
+
+        // Create new variations
+        foreach ($create_variations as $variation_info) {
+            $variation = new \WC_Product_Variation();
+            $variation->set_parent_id($parent_id);
+            $variation->set_attributes($format_attributes($variation_info['attributes']));
+
+            // Set prices if provided
+            if (!empty($variation_info['regular_price'])) {
+                $variation->set_regular_price((float) $variation_info['regular_price']);
+            }
+            if (!empty($variation_info['sale_price'])) {
+                $variation->set_sale_price((float) $variation_info['sale_price']);
+            }
+
+            $variation->set_status('publish');
+            $variation_id = $variation->save();
+            $created_variations[] = self::format_product_data(wc_get_product($variation_id));
+        }
+
+        // Update existing variations
+        foreach ($update_variations as $variation_info) {
+            $variation = wc_get_product($variation_info['id']);
+            if (!$variation || !$variation->is_type('variation')) {
+                continue;
+            }
+            $variation->set_attributes($format_attributes($variation_info['attributes']));
+
+            if (!empty($variation_info['regular_price'])) {
+                $variation->set_regular_price((float) $variation_info['regular_price']);
+            }
+            if (!empty($variation_info['sale_price'])) {
+                $variation->set_sale_price((float) $variation_info['sale_price']);
+            }
+
+            $variation_id = $variation->save();
+            $created_variations[] = self::format_product_data(wc_get_product($variation_id));
+        }
+
+        return $created_variations;
+    }
+
+    /**
+     * Create New Product
+     */
+
+    public static function create_new_product($product_data) {
+        $product = null;
+
+        // Validate basic product data structure
+        if ( ! is_array( $product_data ) ) {
+            return new \WP_Error( 'invalid_product_data', 'Invalid product data structure.', [ 'status' => 400 ] );
+        }
+
+        // Validate required fields for new products
+        if ( ! isset( $product_data['name'] ) || empty( trim( $product_data['name'] ) ) ) {
+            return new \WP_Error( 'missing_name', 'Product name is required for new products.', [ 'status' => 400 ] );
+        }
+
+        // Check for basic required data for new products
+        $has_basic_data = (
+            isset( $product_data['name'] ) && ! empty( trim( $product_data['name'] ) )
+        );
+
+        // Optional: Check for additional recommended fields
+        $has_recommended_data = (
+            isset( $product_data['price'] ) || 
+            isset( $product_data['regular_price'] ) ||
+            isset( $product_data['description'] ) ||
+            isset( $product_data['short_description'] )
+        );
+
+        // Skip if basic data is missing
+        if ( ! $has_basic_data ) {
+            return new \WP_Error( 'insufficient_data', 'Insufficient data to create product.', [ 'status' => 400 ] );
+        }
+
+        // Determine product type and create appropriate product object
+        $product_type = isset( $product_data['type'] ) ? sanitize_text_field( $product_data['type'] ) : 'simple';
+        
+        switch ( $product_type ) {
+            case 'variable':
+                $product = new \WC_Product_Variable();
+                break;
+            case 'variation':
+                $product = new \WC_Product_Variation();
+                // Set parent ID if provided
+                if ( isset( $product_data['parent_id'] ) && ! empty( $product_data['parent_id'] ) ) {
+                    $product->set_parent_id( intval( $product_data['parent_id'] ) );
+                }
+                break;
+            case 'grouped':
+                $product = new \WC_Product_Grouped();
+                break;
+            case 'external':
+                $product = new \WC_Product_External();
+                break;
+            case 'simple':
+            default:
+                $product = new \WC_Product_Simple();
+                break;
+        }
+        // Update/Set product fields if provided (only specified fields)
+        if ( isset( $product_data['name'] ) ) {
+            $product->set_name( sanitize_text_field( $product_data['name'] ) );
+        }
+        if ( isset( $product_data['sku'] ) ) {
+            $product->set_sku( sanitize_text_field( $product_data['sku'] ) );
+        }
+        if ( isset( $product_data['regular_price'] ) && ! empty( $product_data['regular_price'] ) ) {
+            $product->set_regular_price( floatval( $product_data['regular_price'] ) );
+        }
+        if ( isset( $product_data['sale_price'] ) && ! empty( $product_data['sale_price'] ) ) {
+            $product->set_sale_price( floatval( $product_data['sale_price'] ) );
+        }
+        if ( isset( $product_data['stock'] ) && ! empty( $product_data['stock'] ) ) {
+            $product->set_stock_quantity( intval( $product_data['stock'] ) );
+        }
+        if ( isset( $product_data['status'] ) ) {
+            $product->set_status( sanitize_text_field( $product_data['status'] ) );
+        }
+        if ( isset( $product_data['parent_id'] ) && ! empty( $product_data['parent_id'] ) ) {
+            $product->set_parent_id( intval( $product_data['parent_id'] ) );
+        }
+        // Set status for new products
+        $product->set_status( 'publish' );
+        // Save the product
+        $product_id = $product->save();
+        //get new product data
+        $product = wc_get_product( $product_id );
+        $product_data = self::format_product_data( $product );
+
+        $result = [
+            'status'  => 'created',
+            'product' => $product_data,
+        ];
+        return $result;
+    }
+
+    public static function update_existing_product($product_data) {
+        $product = null;
+
+        // Validate basic product data structure
+        if ( ! is_array( $product_data ) ) {
+            return new \WP_Error( 'invalid_product_data', 'Invalid product data structure.', [ 'status' => 400 ] );
+        }
+
+        // Check if product ID is provided and exists
+        if ( isset( $product_data['id'] ) && ! empty( $product_data['id'] ) && is_numeric( $product_data['id'] ) ) {
+            $product_id = intval( $product_data['id'] );
+            $product = wc_get_product( $product_id );
+        }
+
+        if ( ! $product ) {
+            return new \WP_Error( 'product_not_found', 'Product not found.', [ 'status' => 404 ] );
+        }
+
+        // Update/Set product fields if provided (only specified fields)
+        if ( isset( $product_data['name'] ) ) {
+            $product->set_name( sanitize_text_field( $product_data['name'] ) );
+        }
+        if ( isset( $product_data['sku'] ) ) {
+            $product->set_sku( sanitize_text_field( $product_data['sku'] ) );
+        }
+        if ( isset( $product_data['regular_price'] ) && ! empty( $product_data['regular_price'] ) ) {
+            $product->set_regular_price( floatval( $product_data['regular_price'] ) );
+        }
+        if ( isset( $product_data['sale_price'] ) && ! empty( $product_data['sale_price'] ) ) {
+            $product->set_sale_price( floatval( $product_data['sale_price'] ) );
+        }
+        if ( isset( $product_data['stock'] ) && ! empty( $product_data['stock'] ) ) {
+            $product->set_stock_quantity( intval( $product_data['stock'] ) );
+        }
+        if ( isset( $product_data['status'] ) ) {
+            $product->set_status( sanitize_text_field( $product_data['status'] ) );
+        }
+        if ( isset( $product_data['parent_id'] ) && ! empty( $product_data['parent_id'] ) ) {
+            $product->set_parent_id( intval( $product_data['parent_id'] ) );
+        }
+
+        // Save the product
+        $product_id = $product->save();
+
+        //get new product data
+        $product = wc_get_product( $product_id );
+        $product_data = self::format_product_data( $product );
+
+        $result = [
+            'status'  => 'updated',
+            'product' => $product_data,
+        ];
+
+        return $result;
+    }
+
+    public static function update_existing_variable_product($product_data, $related_variations = []) {
+        $result = self::update_existing_product( $product_data );
+        if ( is_wp_error( $result ) ) {
+            return $result;
+        }
+
+        $parent_id = isset( $product_data['id'] ) ? intval( $product_data['id'] ) : 0;
+        $variation_result = self::create_variations_for_variable_product( $parent_id, $related_variations );
+
+        return $result;
+    }
+
     /**
      * Update Products Endpoint
      */
@@ -347,8 +712,8 @@ class Sheets_API_Routes {
             }
 
             // Check if product ID is provided and exists
-            if ( isset( $product_data['product_id'] ) && ! empty( $product_data['product_id'] ) && is_numeric( $product_data['product_id'] ) ) {
-                $product_id = intval( $product_data['product_id'] );
+            if ( isset( $product_data['id'] ) && ! empty( $product_data['id'] ) && is_numeric( $product_data['id'] ) ) {
+                $product_id = intval( $product_data['id'] );
                 $product = wc_get_product( $product_id );
             }
 
