@@ -251,7 +251,6 @@ class Sheets_API_Routes {
 
         $products = $request->get_param( 'products' );
         $deleted_product_ids = $request->get_param( 'deleted_ids' );
-        write_log($deleted_product_ids);
 
         if ( ! is_array( $products ) ) {
             return new \WP_Error( 'invalid_data', 'Products data must be an array.', [ 'status' => 400 ] );
@@ -318,10 +317,8 @@ class Sheets_API_Routes {
             }
 
             if ( !is_wp_error( $result ) ) {
-                $processed_products[] = $product_data;
-                
-                // Only process result as array if it's not a WP_Error
                 if ( isset( $result['status'] ) ) {
+                    $processed_products[] = $product_data;
                     if ( $result['status'] === 'created' ) {
                         $created_products[] = $result['product'];
                     } elseif ( $result['status'] === 'updated' ) {
@@ -331,11 +328,14 @@ class Sheets_API_Routes {
                     // Handle case where result is an array but doesn't have 'status' key
                     if ( is_array( $result ) ) {
                         foreach ( $result as $key => $value ) {
-                            $processed_products[] = $value;
+                            if ( isset( $value ) && ! empty( $value ) ) {
+                                $processed_products = array_merge( $processed_products, $value );
+                            }
+
                             if ( $key === 'created' && isset( $value ) && ! empty( $value ) ) {
-                                $created_products[] = $value;
+                                $created_products = array_merge( $created_products, $value );
                             } elseif ( $key === 'updated' && isset( $value ) && ! empty( $value ) ) {
-                                $updated_products[] = $value;
+                                $updated_products = array_merge( $updated_products, $value );
                             }
                         }
                     }
@@ -348,6 +348,9 @@ class Sheets_API_Routes {
         if ( empty( $processed_products ) ) {
             return new \WP_Error( 'no_products_processed', 'No products were created or updated.', [ 'status' => 400 ] );
         }
+        write_log($processed_products);
+        write_log(count( $processed_products ));
+
 
         return rest_ensure_response( [
             'status'  => 'success',
@@ -717,6 +720,7 @@ class Sheets_API_Routes {
     }
 
     public static function update_existing_variable_product($product_data, $related_variations = []) {
+        $variation_result = [];
         $result = self::update_existing_product( $product_data );
         if ( is_wp_error( $result ) ) {
             return $result;
@@ -724,6 +728,7 @@ class Sheets_API_Routes {
 
         $parent_id = isset( $product_data['id'] ) ? intval( $product_data['id'] ) : 0;
         $variation_result = self::create_variations_for_variable_product( $parent_id, $related_variations );
+        $variation_result['updated'][] = $product_data;
 
         return $variation_result;
     }
