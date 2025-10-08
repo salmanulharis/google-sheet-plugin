@@ -250,6 +250,8 @@ class Sheets_API_Routes {
         }
 
         $products = $request->get_param( 'products' );
+        $deleted_product_ids = $request->get_param( 'deleted_ids' );
+        write_log($deleted_product_ids);
 
         if ( ! is_array( $products ) ) {
             return new \WP_Error( 'invalid_data', 'Products data must be an array.', [ 'status' => 400 ] );
@@ -270,6 +272,29 @@ class Sheets_API_Routes {
         $processed_products = [];
         $created_products = [];
         $updated_products = [];
+        $failed_products = [];
+        $deleted_products = [];
+
+        foreach ( $deleted_product_ids as $deleted_id ) {
+            if ( is_numeric( $deleted_id ) ) {
+                $product = wc_get_product( intval( $deleted_id ) );
+                if ( $product ) {
+                    $result = $product->delete( true ); // Force delete
+                    if ( $result ) {
+                        $deleted_products[] = intval( $deleted_id );
+                    } else {
+                        // Log failure to delete
+                        $failed_products[] = [ 'id' => intval( $deleted_id), 'error' => 'Failed to delete product.' ];
+                    }
+                } else {
+                    // Log product not found
+                    $failed_products[] = [ 'id' => intval( $deleted_id), 'error' => 'Product not found.' ];
+                }
+            } else {
+                // Log invalid ID
+                $failed_products[] = [ 'id' => $deleted_id, 'error' => 'Invalid product ID.' ];
+            }
+        }
 
         foreach ( $products_data as $product_data ) {
             if ( isset( $product_data['id'] ) && ! empty( $product_data['id'] ) && is_numeric( $product_data['id'] ) ) {
@@ -292,14 +317,31 @@ class Sheets_API_Routes {
                 }
             }
 
-            if ( is_wp_error( $result ) ) {
+            if ( !is_wp_error( $result ) ) {
                 $processed_products[] = $product_data;
-            } else {
-                if ( $result['status'] === 'created' ) {
-                    $created_products[] = $result['product'];
-                } elseif ( $result['status'] === 'updated' ) {
-                    $updated_products[] = $result['product'];
+                
+                // Only process result as array if it's not a WP_Error
+                if ( isset( $result['status'] ) ) {
+                    if ( $result['status'] === 'created' ) {
+                        $created_products[] = $result['product'];
+                    } elseif ( $result['status'] === 'updated' ) {
+                        $updated_products[] = $result['product'];
+                    }
+                } else {
+                    // Handle case where result is an array but doesn't have 'status' key
+                    if ( is_array( $result ) ) {
+                        foreach ( $result as $key => $value ) {
+                            $processed_products[] = $value;
+                            if ( $key === 'created' && isset( $value ) && ! empty( $value ) ) {
+                                $created_products[] = $value;
+                            } elseif ( $key === 'updated' && isset( $value ) && ! empty( $value ) ) {
+                                $updated_products[] = $value;
+                            }
+                        }
+                    }
                 }
+            } else {
+                $failed_products[] = $product_data;
             }
         }
 
@@ -310,15 +352,17 @@ class Sheets_API_Routes {
         return rest_ensure_response( [
             'status'  => 'success',
             'message' => sprintf( 
-                __( '%d products processed successfully (%d created, %d updated).', 'sheets-api' ),
+                __( '%d products processed successfully (%d created, %d updated, %d deleted).', 'sheets-api' ),
                 count( $processed_products ),
                 count( $created_products ),
-                count( $updated_products )
+                count( $updated_products ),
+                count( $deleted_products )
             ),
             'data'    => [
                 'processed' => $processed_products,
                 'created'   => $created_products,
                 'updated'   => $updated_products,
+                'deleted'   => $deleted_products,
             ],
         ] );
     }
@@ -360,12 +404,9 @@ class Sheets_API_Routes {
         $product_data = self::format_product_data( $product );
 
         $variation_result = self::create_variations_for_variable_product( $product_id, $related_variations );
-        
-        $result = [
-            'status'  => 'created',
-            'product' => $product_data,
-        ];
-        return $result;
+        $variation_result['created'] = $product_data;
+
+        return $variation_result;
     }
 
     public static function create_attributes_for_variable_product($product, $attributes_string = '' ) {
@@ -428,6 +469,7 @@ class Sheets_API_Routes {
 
     public static function create_variations_for_variable_product($parent_id, $variations_data) {
         $created_variations = [];
+        $updated_variations = [];
         $create_variations = [];
         $update_variations = [];
 
@@ -510,10 +552,15 @@ class Sheets_API_Routes {
             }
 
             $variation_id = $variation->save();
-            $created_variations[] = self::format_product_data(wc_get_product($variation_id));
+            $updated_variations[] = self::format_product_data(wc_get_product($variation_id));
         }
 
-        return $created_variations;
+        $data = [
+            'created' => $created_variations,
+            'updated' => $updated_variations,
+        ];
+
+        return $data;
     }
 
     /**
@@ -678,7 +725,7 @@ class Sheets_API_Routes {
         $parent_id = isset( $product_data['id'] ) ? intval( $product_data['id'] ) : 0;
         $variation_result = self::create_variations_for_variable_product( $parent_id, $related_variations );
 
-        return $result;
+        return $variation_result;
     }
 
     /**
