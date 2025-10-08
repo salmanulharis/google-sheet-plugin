@@ -348,8 +348,6 @@ class Sheets_API_Routes {
         if ( empty( $processed_products ) ) {
             return new \WP_Error( 'no_products_processed', 'No products were created or updated.', [ 'status' => 400 ] );
         }
-        write_log($processed_products);
-        write_log(count( $processed_products ));
 
 
         return rest_ensure_response( [
